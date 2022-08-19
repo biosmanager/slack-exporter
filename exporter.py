@@ -247,23 +247,22 @@ def name_from_uid(user_id, users, real=False):
                 try:
                     return user["profile"]["display_name"]
                 except KeyError:
-                    return "[no full name]"
+                   return "[no full name]"
         else:
             return user["name"]
 
     return "[null user]"
 
 
-def name_from_ch_id(channel_id, channels):
+def name_from_ch_id(channel_id, channels, users):
     for channel in channels:
         if channel["id"] == channel_id:
             return (
-                (channel["user"], "Direct Message")
+                (name_from_uid(channel["user"], users), "Direct Message")
                 if "user" in channel
                 else (channel["name"], "Channel")
             )
     return "[null channel]"
-
 
 def parse_user_list(users):
     result = ""
@@ -421,6 +420,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Get reply threads for all accessible conversations",
     )
+    parser.add_argument(
+        "-f",
+        action="store_true",
+        help="Download files",
+    )
 
     a = parser.parse_args()
     ts = str(datetime.strftime(datetime.now(), "%m-%d-%Y_%H%M%S"))
@@ -438,19 +442,54 @@ if __name__ == "__main__":
             os.makedirs(out_dir, exist_ok=True)
             full_filepath = os.path.join(out_dir, filename)
             print("Writing output to %s" % full_filepath)
-            with open(full_filepath, mode="w") as f:
+            with open(full_filepath, mode="w", encoding="utf-8") as f:
                 if a.json:
                     json.dump(data, f, indent=4)
                 else:
                     f.write(data)
 
+    def save_files(msgs, channel_id, channel_list, users):
+        if "messages" in msgs:
+            msgs = msgs["messages"]
+
+        ch_name, ch_type = name_from_ch_id(channel_id, channel_list, users)
+
+        files_dir = f'files/{ch_type}_{ch_name}'
+
+        if a.o is None:
+            out_dir = files_dir
+        else:
+            out_dir_parent = os.path.abspath(
+                os.path.expanduser(os.path.expandvars(a.o))
+            )
+            out_dir = os.path.join(
+                out_dir_parent, "slack_export_%s" % ts, files_dir)
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        messages = [x for x in msgs if x["type"] ==
+                    "message"]  # files are also messages
+        for msg in messages:
+            if "files" in msg:
+                files = msg["files"]
+                deleted = [
+                    f for f in files if "name" not in f or "url_private_download" not in f
+                ]
+                ok_files = [f for f in files if f not in deleted]
+                for file in ok_files:
+                    print(f'Downloading [{file["id"]}] {file["name"]} from {file["url_private_download"]}')
+                    response = requests.get(file["url_private_download"], headers=HEADERS)
+                    with open(os.path.join(out_dir, f'{file["id"]}_{file["name"]}'), 'wb') as f:
+                        f.write(response.content)
+
     def save_replies(channel_hist, channel_id, channel_list, users):
         reply_timestamps = [x["ts"] for x in channel_hist if "reply_count" in x]
         ch_replies = channel_replies(reply_timestamps, channel_id)
+        ch_name, ch_type = name_from_ch_id(channel_id, channel_list, users)
+
         if a.json:
             data_replies = ch_replies
-        else:
-            ch_name, ch_type = name_from_ch_id(channel_id, channel_list)
+        else:            
             header_str = "Threads in %s: %s\n%s Messages" % (
                 ch_type,
                 ch_name,
@@ -458,23 +497,29 @@ if __name__ == "__main__":
             )
             data_replies = parse_replies(ch_replies, users)
             data_replies = "%s\n%s\n\n%s" % (header_str, sep_str, data_replies)
-        save(data_replies, "channel-replies_%s" % channel_id)
+        save(data_replies, f'channel-replies_{ch_type}_{ch_name}')
 
     def save_channel(channel_hist, channel_id, channel_list, users):
+        ch_name, ch_type = name_from_ch_id(channel_id, channel_list, users)
+
         if a.json:
             data_ch = channel_hist
         else:
             data_ch = parse_channel_history(channel_hist, users)
-            ch_name, ch_type = name_from_ch_id(channel_id, channel_list)
+            
             header_str = "%s Name: %s" % (ch_type, ch_name)
             data_ch = (
                 "Channel ID: %s\n%s\n%s Messages\n%s\n\n"
                 % (channel_id, header_str, len(channel_hist), sep_str)
                 + data_ch
             )
-        save(data_ch, "channel_%s" % channel_id)
+        save(data_ch, f'channel_{ch_type}_{ch_name}')
+        if a.f:
+            save_files(channel_hist, channel_id, channel_list, users)
         if a.r:
             save_replies(channel_hist, channel_id, channel_list, users)
+
+
 
     ch_list = channel_list()
     user_list = user_list()
@@ -493,7 +538,7 @@ if __name__ == "__main__":
         else:
             for ch_id in [x["id"] for x in ch_list]:
                 ch_hist = channel_history(ch_id, oldest=a.fr, latest=a.to)
-                save_channel(ch_hist, ch_id, ch_list, users)
+                save_channel(ch_hist, ch_id, ch_list, user_list)
     # elif, since we want to avoid asking for channel_history twice
     elif a.r:
         for ch_id in [x["id"] for x in channel_list()]:

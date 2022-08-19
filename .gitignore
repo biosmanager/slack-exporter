@@ -1,4 +1,6 @@
 .env
+export
+export-full
 exports
 __pycache__
 .idea
